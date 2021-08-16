@@ -21,11 +21,13 @@
 
 import inspect
 import logging
+import os
 
 from elasticsearch import Elasticsearch
+from logging.handlers import RotatingFileHandler
 
 from perceval.backend import find_signature_parameters, Archive
-from perceval.errors import RateLimitError
+from perceval.errors import RateLimitError, RepositoryError
 from grimoirelab_toolkit.datetime import (datetime_utcnow, str_to_datetime)
 
 from .elastic_mapping import Mapping as BaseMapping
@@ -38,7 +40,31 @@ IDENTITIES_INDEX = "grimoirelab_identities_cache"
 SIZE_SCROLL_IDENTITIES_INDEX = 1000
 
 logger = logging.getLogger(__name__)
+BKAPP_LOG_METRICS = os.environ.get('BKAPP_LOG_METRICS')
+print(f'[DEBUG] BKAPP_LOG_METRICS {BKAPP_LOG_METRICS}')
 
+if not BKAPP_LOG_METRICS:
+    raise Exception('environment variable BKAPP_LOG_METRICS can not be None')
+
+
+def setup_metrics_logger(level=logging.INFO):
+    """
+    setup metrics logger
+    """
+    formatter = logging.Formatter(
+        fmt='%(levelname)s [%(asctime)s] %(pathname)s %(lineno)d %(funcName)s %(process)d %(thread)d \n \t %(message)s \n',
+        datefmt='%Y-%m-%d %H:%M:%S')
+    handler = RotatingFileHandler(os.path.join(BKAPP_LOG_METRICS, 'metrics.log'),
+                                  maxBytes=1024 * 1024 * 10,
+                                  backupCount=5)
+    handler.setFormatter(formatter)
+    logger = logging.getLogger('metrics')
+    logger.setLevel(level)
+    logger.addHandler(handler)
+    return logger
+
+
+logger_metrics = setup_metrics_logger()
 requests_ses = grimoire_con()
 
 
@@ -164,6 +190,9 @@ def feed_backend(url, clean, fetch_archive, backend_name, backend_params,
     except RateLimitError as ex:
         logger.error("Error feeding raw from {} ({}): rate limit exceeded".format(backend_name, backend.origin))
         error_msg = "RateLimitError: seconds to reset {}".format(ex.seconds_to_reset)
+    except RepositoryError as ex:
+        logger_metrics.error('fetch git repository fail, please try later')
+        raise RepositoryError(cause='fetch git repository fail')
     except Exception as ex:
         if backend:
             error_msg = "Error feeding raw from {} ({}): {}".format(backend_name, backend.origin, ex)
@@ -178,7 +207,7 @@ def feed_backend(url, clean, fetch_archive, backend_name, backend_params,
 
 def refresh_projects(enrich_backend):
     logger.debug("Refreshing project field in {}".format(
-                 anonymize_url(enrich_backend.elastic.index_url)))
+        anonymize_url(enrich_backend.elastic.index_url)))
     total = 0
 
     eitems = enrich_backend.fetch()
@@ -220,7 +249,7 @@ def refresh_identities(enrich_backend, author_field=None, author_values=None):
             yield eitem
 
     logger.debug("Refreshing identities fields from {}".format(
-                 anonymize_url(enrich_backend.elastic.index_url)))
+        anonymize_url(enrich_backend.elastic.index_url)))
 
     total = 0
 
@@ -306,7 +335,7 @@ def load_bulk_identities(items_count, new_identities, sh_db, connector_name):
     SortingHat.add_identities(sh_db, new_identities, connector_name)
 
     logger.debug("Processed {} items identities ({} identities) from {}".format(
-                 items_count, len(new_identities), connector_name))
+        items_count, len(new_identities), connector_name))
 
     return identities_count
 
@@ -487,7 +516,7 @@ def enrich_backend(url, clean, backend_name, backend_params, cfg_section_name,
             do_studies(ocean_backend, enrich_backend, studies_args)
         elif do_refresh_projects:
             logger.info("Refreshing project field in {}".format(
-                        anonymize_url(enrich_backend.elastic.index_url)))
+                anonymize_url(enrich_backend.elastic.index_url)))
             field_id = enrich_backend.get_field_unique_id()
             eitems = refresh_projects(enrich_backend)
             enrich_backend.elastic.bulk_upload(eitems, field_id)
@@ -503,7 +532,7 @@ def enrich_backend(url, clean, backend_name, backend_params, cfg_section_name,
                 author_values = [author_uuid]
 
             logger.info("Refreshing identities fields in {}".format(
-                        anonymize_url(enrich_backend.elastic.index_url)))
+                anonymize_url(enrich_backend.elastic.index_url)))
 
             field_id = enrich_backend.get_field_unique_id()
             eitems = refresh_identities(enrich_backend, author_attr, author_values)
@@ -514,7 +543,7 @@ def enrich_backend(url, clean, backend_name, backend_params, cfg_section_name,
             ocean_backend.set_elastic(elastic_ocean)
 
             logger.debug("Adding enrichment data to {}".format(
-                         anonymize_url(enrich_backend.elastic.index_url)))
+                anonymize_url(enrich_backend.elastic.index_url)))
 
             if db_sortinghat and enrich_backend.has_identities():
                 # FIXME: This step won't be done from enrich in the future
@@ -540,7 +569,7 @@ def enrich_backend(url, clean, backend_name, backend_params, cfg_section_name,
     except Exception as ex:
         if backend:
             logger.error("Error enriching raw from {} ({}): {}".format(
-                         backend_name, anonymize_url(backend.origin), ex), exc_info=True)
+                backend_name, anonymize_url(backend.origin), ex), exc_info=True)
         else:
             logger.error("Error enriching raw {}".format(ex), exc_info=True)
 
@@ -555,6 +584,7 @@ def delete_orphan_unique_identities(es, sortinghat_db, current_data_source, acti
     :param current_data_source: current data source
     :param active_data_sources: list of active data sources
     """
+
     def get_uuids_in_index(target_uuids):
         """Find a set of uuids in IDENTITIES_INDEX and return them if exist.
 
@@ -678,9 +708,9 @@ def delete_orphan_unique_identities(es, sortinghat_db, current_data_source, acti
         deleted_unique_identities += delete_unique_identities(orphan_uuids)
 
     logger.debug("[identities retention] Total orphan unique identities deleted from SH: {}".format(
-                 deleted_unique_identities))
+        deleted_unique_identities))
     logger.debug("[identities retention] Total identities in non-active data sources deleted from SH: {}".format(
-                 deleted_identities))
+        deleted_identities))
 
 
 def delete_inactive_unique_identities(es, sortinghat_db, before_date):
@@ -711,7 +741,7 @@ def delete_inactive_unique_identities(es, sortinghat_db, before_date):
 
     if scroll_size == 0:
         logging.warning("[identities retention] No inactive identities found in {} after {}!".format(
-                        IDENTITIES_INDEX, before_date))
+            IDENTITIES_INDEX, before_date))
         return
 
     count = 0
@@ -772,6 +802,7 @@ def populate_identities_index(es_enrichment_url, enrich_index):
     :param es_enrichment_url: url of the ElasticSearch with enriched data
     :param enrich_index: name of the enriched index
     """
+
     class Mapping(BaseMapping):
 
         @staticmethod
